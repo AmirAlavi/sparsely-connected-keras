@@ -122,6 +122,13 @@ class Sparse(Dense):
             output = self.activation(output)
         return output
 
+    def count_params(self):
+        num_weights = 0
+        if self.use_bias:
+            num_weights += self.units
+        num_weights += np.sum(self.adjacency_mat)
+        return num_weights
+        
     def get_config(self):
         config = {
             'adjacency_mat': self.adjacency_mat.tolist()
