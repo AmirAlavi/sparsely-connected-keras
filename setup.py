@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(name='sparsely_connected_keras',
-      version='0.1.0',
+      version='0.2.0',
       description='Sparsely-connected layers for Keras',
       author='Amir Alavi',
       url='https://github.com/AmirAlavi/sparsely-connected-keras',
