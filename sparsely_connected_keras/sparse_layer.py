@@ -1,13 +1,25 @@
 import numpy as np
 from keras import backend as K
 from keras.engine import InputSpec
-from keras.initializers import Initializer, VarianceScaling, _compute_fans
+from keras.initializers import VarianceScaling, Constant, _compute_fans
 from keras.layers import Dense
 
+# NOTE on kernel initializers: the purpose of the SparseLayer is to sparsely
+# connect the input nodes to the layer, by setting certain weights to be zero.
+# This is achieved by multiplying a constant binary 'adjacency matrix' by the
+# kernel matrix, in every execution of __call__ prior to taking the dot product.
+# Because of this, you might be tempted to think that it is ok if the kernel matrix
+# has non-zero values where the adjacency matrix has a zero value (since the elementwise
+# multiplication of W with the adjanceny matrix will zero-out those values anyways).
+# However, for things like regularization, the values actually do matter. By using
+# a sparse layer, we are effectivly simplifying the model, and regularization methods
+# should take this into account correctly. If we have non-zero values sitting
+# around in the kernel where they shouldn't, regularizers would incorrectly penalize
+# us for those weights.
+# Thus, we should guarantee that those values are indeed zero. The only way to do this
+# is to initially set them to zero. If we initialize them to zero, they will stay at zero.
+# Thus, we need some custom initializers.
 
-# For now, only Glorot initializers are supported for the weight matrix of a
-# Sparse layer. Whatever the user specifies for 'kernel_initializer' is
-# ignored.
 class SparseGlorotInitializer(VarianceScaling):
     def __init__(self, adjacency_mat=None, *args, **kwargs):
         self.adjacency_mat = adjacency_mat
@@ -30,12 +42,15 @@ class SparseGlorotInitializer(VarianceScaling):
             stddev = np.sqrt(scale)
             normal_mat = np.random.normal(loc=mean, scale=stddev, size=shape)
             clipped = np.clip(normal_mat, mean - 2 * stddev, mean + 2 * stddev)
-            return clipped * self.adjacency_mat
+            #return clipped * self.adjacency_mat
+            return clipped
         else:
             limit = np.sqrt(3. * scale)
             dense_initial = np.random.uniform(
                 low=-limit, high=limit, size=shape)
-            return dense_initial * self.adjacency_mat
+            print("using uniform dist")
+            #return dense_initial * self.adjacency_mat
+            return dense_initial
 
     def get_config(self):
         config = {
@@ -50,20 +65,6 @@ class SparseGlorotInitializer(VarianceScaling):
         config['adjacency_mat'] = np.array(adjacency_mat_as_list)
         super().from_config(cls, config)
         # return cls(**config)
-
-
-class AdjacencyInitializer(Initializer):
-    def __init__(self, adjacency_mat=1):
-        # Default value is 1 which translates to a dense (fully connected)
-        # layer
-        self.adjacency_mat = adjacency_mat
-
-    def __call__(self, shape, dtype=None):
-        return K.constant(self.adjacency_mat, shape=shape, dtype=dtype)
-
-    def get_config(self):
-        return {'adjacency_mat': self.adjacency_mat}
-
 
 class Sparse(Dense):
     def __init__(self,
@@ -81,24 +82,34 @@ class Sparse(Dense):
         assert len(input_shape) >= 2
         input_dim = input_shape[-1]
 
+        connection_vector = (np.sum(self.adjacency_mat, axis=0) > 0).astype(int)
+        if np.sum(connection_vector) < self.adjacency_mat.shape[1]:
+            print('Warning: not all nodes in the Sparse layer are ' +
+                  'connected to inputs! These nodes will always have zero ' +
+                  'output.')
+
+        print("initializer: ", self.kernel_initializer)
         self.kernel = self.add_weight(
             shape=(
                 input_dim,
                 self.units),
-            initializer=SparseGlorotInitializer(
-                adjacency_mat=self.adjacency_mat,
-                scale=1.,
-                mode='fan_avg',
-                distribution='uniform'),
+            initializer=lambda shape: K.constant(self.adjacency_mat) * self.kernel_initializer(shape),
             name='kernel',
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint)
+        print(type(self.kernel))
+        self.kernel = self.kernel * self.adjacency_mat
         if self.use_bias:
             self.bias = self.add_weight(shape=(self.units,),
-                                        initializer=self.bias_initializer,
+                                        initializer=lambda shape: K.constant(connection_vector) * self.bias_initializer(shape),
                                         name='bias',
                                         regularizer=self.bias_regularizer,
                                         constraint=self.bias_constraint)
+            self.bias_adjacency_tensor = self.add_weight(
+                shape=(self.units,),
+                initializer=Constant(connection_vector),
+                name='bias_adjacency_matrix',
+                trainable=False)
         else:
             self.bias = None
         self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
@@ -107,8 +118,7 @@ class Sparse(Dense):
             shape=(
                 input_dim,
                 self.units),
-            initializer=AdjacencyInitializer(
-                self.adjacency_mat),
+            initializer=Constant(self.adjacency_mat),
             name='adjacency_matrix',
             trainable=False)
         self.built = True
@@ -117,7 +127,7 @@ class Sparse(Dense):
         output = self.kernel * self.adjacency_tensor
         output = K.dot(inputs, output)
         if self.use_bias:
-            output = K.bias_add(output, self.bias)
+            output = K.bias_add(output, self.bias_adjacency_tensor * self.bias)
         if self.activation is not None:
             output = self.activation(output)
         return output
@@ -125,7 +135,8 @@ class Sparse(Dense):
     def count_params(self):
         num_weights = 0
         if self.use_bias:
-            num_weights += self.units
+            bias_weights = np.sum((np.sum(self.adjacency_mat, axis=0) > 0).astype(int))
+            num_weights += bias_weights
         num_weights += np.sum(self.adjacency_mat)
         return num_weights
         
