@@ -1,8 +1,9 @@
 import numpy as np
-from keras import backend as K
-from keras.engine import InputSpec
-from keras.initializers import Constant
-from keras.layers import Dense
+import tensorflow as tf
+from tensorflow.keras import backend as K
+#from keras.engine import InputSpec
+from tensorflow.keras.initializers import Constant
+from tensorflow.keras.layers import Dense, InputSpec
 
 
 class Sparse(Dense):
@@ -18,6 +19,8 @@ class Sparse(Dense):
         super().__init__(units=units, *args, **kwargs)
 
     def build(self, input_shape):
+        def custom_initializer(shape,dtype=None):
+            return tf.random.normal(shape,dtype=dtype)
         assert len(input_shape) >= 2
         input_dim = input_shape[-1]
 
@@ -29,22 +32,20 @@ class Sparse(Dense):
                   'connected to inputs! These nodes will always have zero ' +
                   'output.')
 
-        self.kernel = self.add_weight(
-            shape=(input_dim, self.units),
-            initializer=lambda shape: K.constant(
-                self.adjacency_mat) *
-            self.kernel_initializer(shape),
+        def custom_bias(shape,dtype=None):
+            return connection_vector*tf.random.normal(shape,dtype=dtype)
 
+        self.kernel = self.add_weight(
+            shape=[input_dim, self.units],
+            initializer=custom_initializer,
             name='kernel',
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint)
 
         if self.use_bias:
             self.bias = self.add_weight(
-                shape=(self.units,),
-                initializer=lambda shape: K.constant(connection_vector) *
-                self.bias_initializer(shape),
-
+                shape=[self.units,],
+                initializer=custom_bias,
                 name='bias',
                 regularizer=self.bias_regularizer,
                 constraint=self.bias_constraint)
